@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fondo Animado de Cubos</title>
+<style>
+    /* Estilos generales del cuerpo del documento */
+    body {
+        margin: 0;
+        overflow: hidden; /* Evita barras de scroll si el canvas se desborda accidentalmente */
+        background-color: white; /* Fondo blanco base, como solicitado */
+        position: relative; /* Necesario para el z-index del contenido */
+        font-family: 'Arial', sans-serif; /* Fuente base para el contenido */
+    }
+
+    /* Estilos para el canvas de la animación */
+    #animatedBackground {
+        position: fixed; /* Se queda fijo mientras se hace scroll */
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: -1; /* Coloca el canvas detrás de cualquier otro contenido */
+    }
+
+    /* Estilos para el contenido de ejemplo que irá sobre el fondo animado */
+    .content {
+        position: relative; /* Asegura que esté por encima del canvas */
+        z-index: 1;
+        padding: 20px;
+        color: #333; /* Color de texto oscuro para buen contraste con fondo blanco */
+        text-align: center;
+    }
+    .content h1 {
+        color: #1a1a1a;
+        margin-bottom: 15px;
+    }
+    .content p {
+        font-size: 1.1em;
+        line-height: 1.6;
+        max-width: 700px; /* Limita el ancho del párrafo para mejor legibilidad */
+        margin: 10px auto; /* Centra el párrafo */
+    }
+</style>
+</head>
+<body>
+
+<canvas id="animatedBackground"></canvas>
+
+<div class="content">
+    <h1>Página con Fondo Dinámico de Cubos</h1>
+    <p>Este es un ejemplo de cómo se vería tu contenido sobre el fondo animado. Los cubos blancos caen y se apilan en columnas detrás de este texto, con transparencia variable.</p>
+    <p>La cantidad de columnas se ajusta según el ancho de la pantalla, y las columnas se reinician al llenarse, con transparencia inicial variable por columna.</p>
+</div>
+
+<script>
+// Obtener el elemento canvas y su contexto 2D
+const canvas = document.getElementById('animatedBackground');
+const ctx = canvas.getContext('2d');
+
+// Variables para las dimensiones de la pantalla
+let screenWidth = window.innerWidth;
+let screenHeight = window.innerHeight;
+canvas.width = screenWidth;
+canvas.height = screenHeight;
+
+// --- Configuración de la Animación ---
+const CUBE_SIZE = 20; // Tamaño de cada cubo en píxeles
+// const MAX_STACK_HEIGHT_CUBES = 70; // Eliminamos esta constante, se calculará dinámicamente
+const FALL_SPEED = 15; // Velocidad de caída de los cubos
+const COLUMN_SPAWN_DELAY = 400; // Retardo en milisegundos para la aparición de cada nueva columna (efecto lluvia)
+const CUBE_DROP_INTERVAL = 500; // Intervalo en ms para que un nuevo cubo empiece a caer en una columna activa
+
+// --- Configuración de Color y Transparencia Progresiva ---
+const CUBE_BASE_RGB = [220, 220, 220]; // Color base RGB de los cubos (sin alfa)
+const CUBE_BORDER_BASE_RGB = [180, 180, 180]; // Color base RGB del borde (sin alfa)
+
+const CUBE_MAX_INITIAL_ALPHA = 0.5; // Alfa inicial MÁXIMO para el color del cubo (para la primera columna)
+const CUBE_BORDER_MAX_INITIAL_ALPHA = 0.4; // Alfa inicial MÁXIMO para el color del borde (para la primera columna)
+
+const ALPHA_DECREMENT_PER_CUBE_IN_COLUMN = 0.01; // Cuánto disminuirá el alfa por cada cubo apilado DENTRO de una columna
+const COLUMN_INITIAL_ALPHA_DECREMENT_ON_SPAWN = 0.0075; // Cuánto disminuirá el alfa inicial para cada COLUMNA subsiguiente
+
+const MIN_ALPHA = 0.03; // Alfa mínimo para evitar que los cubos se vuelvan completamente invisibles
+
+let columns = []; // Array para almacenar la información de cada columna
+let numColumns; // Número de columnas, se determinará dinámicamente
+let maxStackedCubes; // Nueva variable para la altura máxima apilada en cubos
+let animationFrameId; // ID para controlar el bucle de animación (requestAnimationFrame)
+
+// --- Control de Ciclos de Repetición ---
+let completedCycles = 0; // Contador para los ciclos de repetición
+const RECYCLE_AFTER_CYCLES = 100; // Define cuántos ciclos antes de reiniciar
+// --------------------------------------
+
+
+/**
+ * Clase para representar un Cubo individual.
+ * El color y borderColor ahora se pasan al constructor.
+ */
+class Cube {
+    constructor(x, y, size, color, borderColor) {
+        this.x = x; // Posición X
+        this.y = y; // Posición Y
+        this.size = size; // Tamaño del cubo
+        this.isFalling = true; // Estado: ¿está cayendo o apilado?
+        this.color = color; // Color RGBA específico para este cubo
+        this.borderColor = borderColor; // Color RGBA específico para el borde de este cubo
+    }
+
+    // Dibuja el cubo en el canvas
+    draw() {
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+        ctx.strokeStyle = this.borderColor;
+        ctx.strokeRect(this.x, this.y, this.size, this.size);
+    }
+
+    // Actualiza la posición del cubo
+    update(stackedHeightInColumnPx) {
+        if (this.isFalling) {
+            this.y += FALL_SPEED;
+            // Comprueba si el cubo ha llegado al "suelo" de la columna o a la pila existente
+            if (this.y + this.size > screenHeight - stackedHeightInColumnPx) {
+                this.y = screenHeight - stackedHeightInColumnPx - this.size; // Ajusta la posición final
+                this.isFalling = false; // El cubo deja de caer
+            }
+        }
+    }
+}
+
+/**
+ * Determina el número de columnas basado en el ancho de la pantalla y el tamaño del cubo.
+ * @returns {number} - El número de columnas a generar.
+ */
+function determineNumberOfColumns() {
+    // Simplemente dividimos el ancho de la pantalla por el tamaño del cubo
+    // Puedes ajustar este factor si quieres más o menos columnas / espacio
+    return Math.floor(screenWidth / CUBE_SIZE);
+}
+
+/**
+ * Determina la altura máxima de apilamiento de cubos basada en la altura de la pantalla y el tamaño del cubo.
+ * @returns {number} - La altura máxima de apilamiento en número de cubos.
+ */
+function determineMaxStackedCubes() {
+    // Dividimos la altura de la pantalla por el tamaño del cubo
+    return Math.floor(screenHeight / CUBE_SIZE);
+}
+
+
+/**
+ * Inicializa o reinicializa las columnas.
+ */
+function initColumns() {
+    columns = []; // Limpia las columnas existentes
+    numColumns = determineNumberOfColumns(); // Calcula dinámicamente el número de columnas
+    maxStackedCubes = determineMaxStackedCubes(); // Calcula dinámicamente la altura máxima apilada
+    const columnWidth = screenWidth / numColumns; // Ancho disponible para cada columna (ahora es básicamente CUBE_SIZE)
+
+    for (let i = 0; i < numColumns; i++) {
+        columns.push({
+            id: i, // El ID se usa para calcular el decremento de alfa inicial de la columna
+            x: i * columnWidth + (columnWidth - CUBE_SIZE) / 2, // Centra el cubo en el espacio de la columna
+            cubes: [], // Array para los objetos Cube de esta columna
+            stackedHeightPx: 0, // Altura actual de la pila de cubos en píxeles
+            isActive: false, // Para el efecto de aparición progresiva (lluvia)
+            activationTime: Date.now() + i * COLUMN_SPAWN_DELAY, // Momento en que la columna se activa
+            lastCubeDropTime: 0, // Para controlar el intervalo de caída de nuevos cubos
+            isClearing: false // Estado para manejar la animación de limpieza (Tetris)
+        });
+    }
+     // Reiniciar el contador de ciclos al inicializar columnas
+    completedCycles = 0;
+}
+
+/**
+ * Añade un nuevo cubo a una columna específica si las condiciones lo permiten.
+ * Calcula el color del cubo basado en la cantidad de cubos ya apilados y el alfa inicial de la columna.
+ * @param {number} columnIndex - El índice de la columna.
+ */
+function addCubeToColumn(columnIndex) {
+    const column = columns[columnIndex];
+    // No añadir si la columna no existe, se está limpiando o está llena (usando maxStackedCubes)
+    const currentStackedCubesInColumn = Math.floor(column.stackedHeightPx / CUBE_SIZE);
+    if (!column || column.isClearing || currentStackedCubesInColumn >= maxStackedCubes) { // Usamos maxStackedCubes aquí
+        return;
+    }
+
+    const now = Date.now();
+    // Solo añade un cubo si la columna está activa y ha pasado el intervalo CUBE_DROP_INTERVAL
+    if (column.isActive && now - column.lastCubeDropTime > CUBE_DROP_INTERVAL) {
+        // Limita el número de cubos cayendo simultáneamente por columna para mejor rendimiento y estética
+        const fallingCubesInColumn = column.cubes.filter(cube => cube.isFalling).length;
+        if (fallingCubesInColumn < 2) { // Permitir máximo 2 cubos cayendo a la vez por columna
+
+            // Calcular el alfa inicial para ESTA COLUMNA específica, basado en su ID (orden de aparición)
+            const columnBaseFillAlpha = Math.max(MIN_ALPHA, CUBE_MAX_INITIAL_ALPHA - column.id * COLUMN_INITIAL_ALPHA_DECREMENT_ON_SPAWN);
+            const columnBaseBorderAlpha = Math.max(MIN_ALPHA, CUBE_BORDER_MAX_INITIAL_ALPHA - column.id * COLUMN_INITIAL_ALPHA_DECREMENT_ON_SPAWN);
+
+            // Calcular la transparencia para el NUEVO CUBO, basada en el alfa inicial de SU columna y cuántos cubos ya están apilados en ella
+            const finalFillAlpha = Math.max(MIN_ALPHA, columnBaseFillAlpha - currentStackedCubesInColumn * ALPHA_DECREMENT_PER_CUBE_IN_COLUMN);
+            const finalBorderAlpha = Math.max(MIN_ALPHA, columnBaseBorderAlpha - currentStackedCubesInColumn * ALPHA_DECREMENT_PER_CUBE_IN_COLUMN);
+
+            const cubeColor = `rgba(${CUBE_BASE_RGB[0]}, ${CUBE_BASE_RGB[1]}, ${CUBE_BASE_RGB[2]}, ${finalFillAlpha})`;
+            const borderColor = `rgba(${CUBE_BORDER_BASE_RGB[0]}, ${CUBE_BORDER_BASE_RGB[1]}, ${CUBE_BORDER_BASE_RGB[2]}, ${finalBorderAlpha})`;
+
+            const newCube = new Cube(column.x, -CUBE_SIZE, CUBE_SIZE, cubeColor, borderColor); // Inicia el cubo fuera de la pantalla (arriba)
+            column.cubes.push(newCube);
+            column.lastCubeDropTime = now;
+        }
+    }
+}
+
+/**
+ * Realiza el efecto "Tetris": limpia una columna llena de forma gradual.
+ * @param {number} columnIndex - El índice de la columna a limpiar.
+ */
+function clearColumn(columnIndex) {
+    const column = columns[columnIndex];
+    if (!column || column.isClearing) return;
+
+    column.isClearing = true;
+    // Selecciona solo los cubos apilados (no los que aún están cayendo)
+    let cubesToClear = column.cubes.filter(c => !c.isFalling);
+    cubesToClear.sort((a, b) => b.y - a.y); // Ordena de abajo hacia arriba para eliminarlos en ese orden
+
+    let clearIndex = 0;
+    const clearIntervalId = setInterval(() => {
+        if (clearIndex < cubesToClear.length) {
+            const cubeToRemove = cubesToClear[clearIndex];
+            const indexInMainArray = column.cubes.indexOf(cubeToRemove);
+            if (indexInMainArray > -1) {
+                column.cubes.splice(indexInMainArray, 1); // Elimina el cubo del array principal
+            }
+            clearIndex++;
+        } else {
+            clearInterval(clearIntervalId); // Detiene el intervalo cuando todos los cubos se han eliminado
+            column.stackedHeightPx = 0; // Resetea la altura de la pila
+            column.isClearing = false;
+
+            // Incrementar el contador de ciclos completados y reiniciar si es necesario
+            completedCycles++; // Incrementar el contador
+            if (completedCycles >= RECYCLE_AFTER_CYCLES) { // Comprobar si se alcanzó el límite
+                console.log(`Reiniciando animación después de ${completedCycles} ciclos.`);
+                handleResize(); // Reiniciar toda la animación con las nuevas dimensiones (aunque no hayan cambiado)
+                return; // Salir de la función clearColumn para evitar seguir procesando esta columna
+            }
+            // Fin de la modificación para reiniciar
+
+            // Reactiva la columna para que empiece a caer de nuevo después de un retardo,
+            // colocándola al final de la "cola" de activación para el efecto lluvia.
+            // Su alfa inicial se recalculará basado en su ID original, manteniendo la consistencia.
+            column.activationTime = Date.now() + (numColumns * COLUMN_SPAWN_DELAY / 2) + Math.random() * 1000;
+            column.isActive = false; // Se reactivará cuando llegue su tiempo
+            column.lastCubeDropTime = 0; // Resetea el tiempo del último cubo
+        }
+    }, 30); // Velocidad de desaparición de los cubos (más bajo = más rápido)
+}
+
+/**
+ * Bucle principal de la animación.
+ */
+function animate() {
+    ctx.clearRect(0, 0, screenWidth, screenHeight); // Limpia el canvas en cada frame
+
+    const now = Date.now();
+
+    for (let i = 0; i < columns.length; i++) {
+        const column = columns[i];
+
+        // Activa la columna si ha llegado su momento y no está ya activa o limpiándose
+        if (!column.isActive && !column.isClearing && now >= column.activationTime) {
+            column.isActive = true;
+            column.lastCubeDropTime = now; // Permite que el primer cubo caiga pronto
+        }
+
+        // Si la columna está activa y no se está limpiando, intenta añadir un nuevo cubo
+        if (column.isActive && !column.isClearing) {
+            addCubeToColumn(i);
+        }
+
+        // Actualiza y dibuja los cubos de la columna
+        let currentStackedCubesCount = 0; // Renombrado para claridad
+        let newStackedHeightPx = 0;
+
+        for (let j = column.cubes.length - 1; j >= 0; j--) {
+            const cube = column.cubes[j];
+
+            // Cálculo de la altura de la pila para la colisión del cubo actual.
+            // Esta es la altura de los *otros* cubos ya apilados en la columna.
+            let effectiveStackedHeightForCollision = 0;
+            for(let k=0; k < column.cubes.length; k++){
+                if (k === j) continue; // No contar el propio cubo que se está actualizando
+                if (!column.cubes[k].isFalling) {
+                    effectiveStackedHeightForCollision += CUBE_SIZE;
+                }
+            }
+            cube.update(effectiveStackedHeightForCollision);
+
+            if (!cube.isFalling) {
+                // Este contador y la altura se recalcularán de forma definitiva después del bucle
+            }
+            cube.draw();
+        }
+
+        // Recalcular la altura total apilada y el conteo de cubos apilados para la columna después de todas las actualizaciones
+        newStackedHeightPx = 0;
+        currentStackedCubesCount = 0; // Resetea para contar correctamente
+        column.cubes.filter(c => !c.isFalling).forEach(() => {
+            newStackedHeightPx += CUBE_SIZE;
+            currentStackedCubesCount++;
+        });
+        column.stackedHeightPx = newStackedHeightPx;
+
+
+        // Comprueba si la columna está llena (usando maxStackedCubes)
+        if (currentStackedCubesCount >= maxStackedCubes && !column.isClearing) { // Usamos maxStackedCubes aquí
+            clearColumn(i);
+        }
+
+        // Medida de seguridad: eliminar cubos que se hayan salido de la pantalla por algún error
+        column.cubes = column.cubes.filter(cube => cube.y < screenHeight + CUBE_SIZE * 5);
+    }
+
+    animationFrameId = requestAnimationFrame(animate); // Solicita el siguiente frame de la animación
+}
+
+/**
+ * Maneja el evento de redimensionamiento de la ventana del navegador.
+ */
+function handleResize() {
+    screenWidth = window.innerWidth;
+    screenHeight = window.innerHeight;
+    canvas.width = screenWidth;
+    canvas.height = screenHeight;
+
+    // Detiene la animación actual si existe para evitar múltiples bucles
+    if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+    }
+    // Reinicia las columnas y la animación con las nuevas dimensiones
+    initColumns();
+    animate();
+}
+
+// Añade un listener para el evento 'resize' de la ventana
+window.addEventListener('resize', handleResize);
+
+// Inicia la animación
+initColumns();
+animate();
+
+</script>
+
+</body>
+</html>
